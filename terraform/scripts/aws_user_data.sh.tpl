@@ -69,8 +69,7 @@ cat <<'CWEOF' > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.jso
             "log_group_name": "${cloudwatch_log_group}",
             "log_stream_name": "{instance_id}",
             "timezone": "UTC",
-            "timestamp_format": "%Y-%m-%d %H:%M:%S,%f",
-            "start_position": "beginning"
+            "timestamp_format": "%Y-%m-%d %H:%M:%S,%f"
           }
         ]
       }
