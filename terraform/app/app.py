@@ -23,6 +23,15 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 
+@app.after_request
+def log_http_errors(response):
+    if response.status_code >= 400:
+        logger.error(
+            f"HTTP {response.status_code} - {request.method} {request.path}"
+        )
+    return response
+
+
 @app.route("/health")
 def health():
     logger.info("Health check requested")
