@@ -49,16 +49,13 @@ tasks:
       Check whether the Flask application at {{ inputs.aws_host }} is healthy right now.
     tools:
       - type: io.kestra.plugin.ai.tool.KestraTask
-        description: >
-          Calls the /health endpoint of the Flask app.
-          Returns the HTTP status code and the response body so you can
-          determine if the application is up and healthy.
-        task:
-          type: io.kestra.plugin.core.http.Request
-          uri: "http://{{ inputs.aws_host }}:5000/health"
-          method: GET
-          options:
-            allowFailed: true
+        tasks:
+          - id: call_health_endpoint
+            type: io.kestra.plugin.core.http.Request
+            uri: "http://{{ inputs.aws_host }}:5000/health"
+            method: GET
+            options:
+              allowFailed: true
 
   # ── Step 2: Alert on Slack if the agent reported DOWN ─────────────────────
   - id: alert_if_down
