@@ -1,0 +1,101 @@
+id: ai-health-check
+namespace: devops.monitor
+
+# ─── How this flow works ──────────────────────────────────────────────────────
+#
+#  Instead of a plain HTTP request + static condition, an AI Agent autonomously:
+#    1. Calls the /health endpoint via a KestraTask tool
+#    2. Reads the HTTP status code AND the response body
+#    3. Reasons about whether the app is truly healthy
+#       (e.g. a 200 with {"status": "degraded"} is still a problem)
+#    4. Returns a structured STATUS: UP / STATUS: DOWN verdict
+#
+#  The alert step reads that verdict and fires Slack only on DOWN.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+inputs:
+  - id: aws_host
+    type: STRING
+    description: "Public IP of the AWS EC2 instance (terraform output aws_ec2_public_ip)"
+
+triggers:
+  - id: every_2_minutes
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "*/2 * * * *"
+    inputs:
+      aws_host: "REPLACE_WITH_AWS_IP"  # paste: terraform output aws_ec2_public_ip
+
+tasks:
+  # ── Step 1: AI Agent calls the health endpoint as a tool ───────────────────
+  - id: health_agent
+    type: io.kestra.plugin.ai.agent.AIAgent
+    systemMessage: |
+      You are an SRE agent responsible for monitoring a Flask application running on AWS EC2.
+      You have one tool available: call_health_endpoint.
+
+      Rules:
+      - Call the tool exactly once.
+      - If the HTTP status code is 200 AND the response body contains "healthy", the app is UP.
+      - If the status code is anything other than 200, the app is DOWN.
+      - If the tool call fails (connection refused, timeout), the app is DOWN.
+      - A 200 response whose body does NOT contain "healthy" counts as DOWN.
+
+      Always respond with exactly this format (no extra text):
+      STATUS: UP - <one sentence reason>
+      or
+      STATUS: DOWN - <one sentence reason including the status code or error>
+    prompt: |
+      Check whether the Flask application at {{ inputs.aws_host }} is healthy right now.
+    tools:
+      - type: io.kestra.plugin.ai.tool.KestraTask
+        description: >
+          Calls the /health endpoint of the Flask app.
+          Returns the HTTP status code and the response body so you can
+          determine if the application is up and healthy.
+        task:
+          type: io.kestra.plugin.core.http.Request
+          uri: "http://{{ inputs.aws_host }}:5000/health"
+          method: GET
+          options:
+            allowFailed: true
+
+  # ── Step 2: Alert on Slack if the agent reported DOWN ─────────────────────
+  - id: alert_if_down
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ 'DOWN' in outputs.health_agent.outputText }}"
+    then:
+      - id: slack_alert
+        type: io.kestra.plugin.notifications.slack.SlackIncomingWebhook
+        url: "{{ secret('SLACK_WEBHOOK') }}"
+        payload: |
+          {
+            "text": "🔴 *Flask App Health Alert (AWS EC2)*\n{{ outputs.health_agent.outputText }}"
+          }
+
+# ─── Provider config (applied to all AIAgent tasks in this flow) ─────────────
+#
+#  The provider MUST support function/tool calling.
+#  Supported: OpenAI GPT-4o/GPT-4o-mini, Google Gemini 1.5+, Anthropic Claude 3+
+#
+#  Set ONE of the secrets below in Kestra and uncomment the matching block.
+# ─────────────────────────────────────────────────────────────────────────────
+pluginDefaults:
+  - type: io.kestra.plugin.ai.agent.AIAgent
+    values:
+      provider:
+        type: io.kestra.plugin.ai.provider.OpenAI
+        apiKey: "{{ secret('OPENAI_API_KEY') }}"
+        modelName: gpt-4o-mini
+
+      # ── Google Gemini alternative ──────────────────────────────────────────
+      # provider:
+      #   type: io.kestra.plugin.ai.provider.GoogleGemini
+      #   apiKey: "{{ secret('GEMINI_API_KEY') }}"
+      #   modelName: gemini-2.5-flash
+
+      # ── Anthropic Claude alternative ───────────────────────────────────────
+      # provider:
+      #   type: io.kestra.plugin.ai.provider.Anthropic
+      #   apiKey: "{{ secret('ANTHROPIC_API_KEY') }}"
+      #   modelName: claude-opus-4-6
