@@ -2,28 +2,24 @@ id: ai-log-monitor
 namespace: devops.monitor
 
 # ─── Flow Inputs ──────────────────────────────────────────────────────────────
-# Pass the Terraform-provisioned IPs when triggering manually, or hardcode them
-# in the scheduled trigger's inputs block.
 inputs:
   - id: aws_host
     type: STRING
     description: "Public IP of the AWS EC2 instance (from terraform output aws_ec2_public_ip)"
 
-  - id: gcp_host
+  - id: aws_instance_id
     type: STRING
-    description: "External IP of the GCP VM instance (from terraform output gcp_vm_external_ip)"
+    description: "EC2 instance ID — used as the CloudWatch log stream name (from terraform output aws_cloudwatch_log_stream)"
 
 triggers:
   - id: every_2_minutes
     type: io.kestra.plugin.core.trigger.Schedule
     cron: "*/2 * * * *"
     inputs:
-      aws_host: "REPLACE_WITH_AWS_IP"   # paste terraform output aws_ec2_public_ip
-      #gcp_host: "REPLACE_WITH_GCP_IP"   # paste terraform output gcp_vm_external_ip
+      aws_host: "REPLACE_WITH_AWS_IP"           # paste: terraform output aws_ec2_public_ip
+      aws_instance_id: "REPLACE_WITH_INSTANCE_ID" # paste: terraform output aws_cloudwatch_log_stream
 
 tasks:
-  # ── AWS VM ──────────────────────────────────────────────────────────────────
-
   # 1. Check if the AWS app is up
   - id: health_check_aws
     type: io.kestra.plugin.core.http.Request
@@ -32,7 +28,7 @@ tasks:
     options:
       allowFailed: true
 
-  # 2. Hit the AWS main endpoint to generate real traffic (fails ~30% of time)
+  # 2. Hit the main endpoint to generate real traffic (fails ~30% of the time)
   - id: ping_api_aws
     type: io.kestra.plugin.core.http.Request
     uri: "http://{{ inputs.aws_host }}:5000/api/data"
@@ -40,105 +36,56 @@ tasks:
     options:
       allowFailed: true
 
-  # 3. Fetch last 50 log lines from the AWS VM via HTTP
+  # 3. Pull the last 50 log events from CloudWatch
   #
-  #    WHY HTTP and not SSH?
+  #    WHY CloudWatch and not the /logs HTTP endpoint?
   #    ─────────────────────────────────────────────────────────────────────────
-  #    Option considered: io.kestra.plugin.fs.ssh.Command
-  #      host: "{{ inputs.aws_host }}"
-  #      authMethod: PUBLIC_KEY
-  #      username: ubuntu
-  #      privateKey: "{{ secret('SSH_PRIVATE_KEY') }}"
-  #      commands:
-  #        - tail -n 50 /app/logs/app.log
-  #    Problem: the SSH plugin's output is exitCode + vars (key=value pairs),
-  #    not raw stdout — so multi-line log content cannot be passed cleanly to
-  #    the AI prompt without extra encoding gymnastics.
-  #
-  #    Option considered: io.kestra.plugin.scripts.shell.Commands
-  #    Problem: runs on the Kestra worker, not the remote VM. It sees the
-  #    Kestra server's filesystem, so /app/logs/app.log doesn't exist there.
-  #
-  #    Option considered: io.kestra.plugin.ee.core.log.LogShipper
-  #    Problem: ships Kestra's own internal execution logs to external sinks
-  #    (CloudWatch, S3, GCS, Splunk). Cannot read arbitrary files on a VM.
-  #
-  #    Chosen: Flask exposes GET /logs?lines=50 → returns JSON with log content.
-  #    Kestra calls it with a plain http.Request — no SSH, no secrets, clean output.
+  #    The /logs endpoint reads from the local filesystem on the VM.
+  #    CloudWatch is the authoritative, durable log store — decoupled from
+  #    the VM lifecycle. If the VM is unhealthy or restarted, CloudWatch
+  #    still has the full log history.
   #    ─────────────────────────────────────────────────────────────────────────
+  #
+  #    Requires Kestra secrets:
+  #      AWS_ACCESS_KEY_ID     — IAM user with CloudWatchLogsReadOnlyAccess
+  #      AWS_SECRET_ACCESS_KEY
   - id: read_logs_aws
-    type: io.kestra.plugin.core.http.Request
-    uri: "http://{{ inputs.aws_host }}:5000/logs?lines=50"
-    method: GET
-    options:
-      allowFailed: true
+    type: io.kestra.plugin.aws.cloudwatch.logs.GetLogEvents
+    accessKeyId: "{{ secret('AWS_ACCESS_KEY_ID') }}"
+    secretKeyId: "{{ secret('AWS_SECRET_ACCESS_KEY') }}"
+    region: eu-central-1
+    logGroupName: /flask-app/ec2/app-logs
+    logStreamName: "{{ inputs.aws_instance_id }}"
+    limit: 50
 
-  # ── GCP VM ──────────────────────────────────────────────────────────────────
-
-  # 4. Check if the GCP app is up
-  - id: health_check_gcp
-    type: io.kestra.plugin.core.http.Request
-    uri: "http://{{ inputs.gcp_host }}:5000/health"
-    method: GET
-    options:
-      allowFailed: true
-
-  # 5. Hit the GCP main endpoint
-  - id: ping_api_gcp
-    type: io.kestra.plugin.core.http.Request
-    uri: "http://{{ inputs.gcp_host }}:5000/api/data"
-    method: GET
-    options:
-      allowFailed: true
-
-  # 6. Fetch last 50 log lines from the GCP VM via HTTP
-  - id: read_logs_gcp
-    type: io.kestra.plugin.core.http.Request
-    uri: "http://{{ inputs.gcp_host }}:5000/logs?lines=50"
-    method: GET
-    options:
-      allowFailed: true
-
-  # ── AI Analysis ─────────────────────────────────────────────────────────────
-
-  # 7. AI Agent analyses both clouds together
+  # 4. AI Agent analyses the health + CloudWatch logs
   - id: ai_diagnosis
     type: io.kestra.plugin.ai.agent.AIAgent
     systemMessage: |
-      You are an expert SRE monitoring a multi-cloud deployment (AWS + GCP).
-      You receive health status and recent logs from both VMs.
+      You are an expert SRE monitoring an AWS EC2 Flask application.
+      You receive the HTTP health status and the last 50 log lines from CloudWatch.
       Your job:
       1. Determine overall severity: OK / WARNING / CRITICAL
       2. Identify the root cause in plain English (1 sentence)
-      3. Which cloud is affected (AWS / GCP / both)?
-      4. Give one specific fix the developer should do right now
+      3. Give one specific fix the developer should do right now
       Keep your response under 6 lines. Be direct.
     prompt: |
-      === AWS ===
-      Health: {{ outputs.health_check_aws.code }}
-      API Response: {{ outputs.ping_api_aws.code }}
-      Recent Logs:
-      {{ outputs.read_logs_aws.body | jq('.logs') }}
+      === AWS EC2 ===
+      Health endpoint status : {{ outputs.health_check_aws.code }}
+      API endpoint status    : {{ outputs.ping_api_aws.code }}
 
-      === GCP ===
-      Health: {{ outputs.health_check_gcp.code }}
-      API Response: {{ outputs.ping_api_gcp.code }}
-      Recent Logs:
-      {{ outputs.read_logs_gcp.body | jq('.logs') }}
+      Recent logs (CloudWatch /flask-app/ec2/app-logs):
+      {{ outputs.read_logs_aws.events | jq('[.[].message] | join("\n")') }}
 
-  # 8. Alert on Slack only when something is wrong on either cloud
+  # 5. Alert on Slack only when something is wrong
   - id: alert_if_broken
     type: io.kestra.plugin.core.flow.If
-    condition: >-
-      {{ outputs.ping_api_aws.code != 200
-         or outputs.ping_api_gcp.code != 200
-         or 'ERROR' in outputs.read_logs_aws.body
-         or 'ERROR' in outputs.read_logs_gcp.body }}
+    condition: "{{ outputs.ping_api_aws.code != 200 or outputs.health_check_aws.code != 200 }}"
     then:
       - id: slack_alert
         type: io.kestra.plugin.notifications.slack.SlackIncomingWebhook
         url: "{{ secret('SLACK_WEBHOOK') }}"
         payload: |
           {
-            "text": "🔴 *AI Incident Report (Multi-Cloud)*\n{{ outputs.ai_diagnosis.outputText }}"
+            "text": "🔴 *AI Incident Report (AWS)*\n{{ outputs.ai_diagnosis.outputText }}"
           }
