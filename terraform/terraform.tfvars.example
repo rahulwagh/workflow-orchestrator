@@ -1,0 +1,16 @@
+# ─── Copy this file to terraform.tfvars and fill in your values ──────────────
+# cp terraform.tfvars.example terraform.tfvars
+
+# ─── AWS Configuration ────────────────────────────────────────────────────────
+aws_region          = "us-east-1"
+aws_key_name        = "flask-app-key"
+aws_public_key_path = "~/.ssh/id_rsa.pub"
+aws_instance_type   = "t2.micro"
+
+# ─── GCP Configuration ────────────────────────────────────────────────────────
+gcp_project_id          = "your-gcp-project-id"   # REQUIRED: replace with your GCP project ID
+gcp_region              = "us-central1"
+gcp_zone                = "us-central1-a"
+gcp_machine_type        = "e2-micro"
+gcp_ssh_user            = "ubuntu"
+gcp_ssh_public_key_path = "~/.ssh/id_rsa.pub"
