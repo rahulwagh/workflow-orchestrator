@@ -7,17 +7,12 @@ inputs:
     type: STRING
     description: "Public IP of the AWS EC2 instance (from terraform output aws_ec2_public_ip)"
 
-  - id: aws_instance_id
-    type: STRING
-    description: "EC2 instance ID — used as the CloudWatch log stream name (from terraform output aws_cloudwatch_log_stream)"
-
 triggers:
   - id: every_2_minutes
     type: io.kestra.plugin.core.trigger.Schedule
     cron: "*/2 * * * *"
     inputs:
-      aws_host: "REPLACE_WITH_AWS_IP"           # paste: terraform output aws_ec2_public_ip
-      aws_instance_id: "REPLACE_WITH_INSTANCE_ID" # paste: terraform output aws_cloudwatch_log_stream
+      aws_host: "REPLACE_WITH_AWS_IP"  # paste: terraform output aws_ec2_public_ip
 
 tasks:
   # 1. Check if the AWS app is up
@@ -36,51 +31,60 @@ tasks:
     options:
       allowFailed: true
 
-  # 3. Pull the last 50 log events from CloudWatch
+  # 3. Query ErrorCount metric from CloudWatch (namespace: FlaskApp/Logs)
   #
-  #    WHY CloudWatch and not the /logs HTTP endpoint?
-  #    ─────────────────────────────────────────────────────────────────────────
-  #    The /logs endpoint reads from the local filesystem on the VM.
-  #    CloudWatch is the authoritative, durable log store — decoupled from
-  #    the VM lifecycle. If the VM is unhealthy or restarted, CloudWatch
-  #    still has the full log history.
-  #    ─────────────────────────────────────────────────────────────────────────
-  #
+  #    This metric is driven by a CloudWatch Metric Filter on the log group
+  #    /flask-app/ec2/app-logs that increments by 1 for every [ERROR] line.
   #    Requires Kestra secrets:
-  #      AWS_ACCESS_KEY_ID     — IAM user with CloudWatchLogsReadOnlyAccess
+  #      AWS_ACCESS_KEY_ID     — IAM user with CloudWatchReadOnlyAccess
   #      AWS_SECRET_ACCESS_KEY
-  - id: read_logs_aws
-    type: io.kestra.plugin.aws.cloudwatch.logs.GetLogEvents
+  - id: query_error_count
+    type: io.kestra.plugin.aws.cloudwatch.Query
     accessKeyId: "{{ secret('AWS_ACCESS_KEY_ID') }}"
     secretKeyId: "{{ secret('AWS_SECRET_ACCESS_KEY') }}"
     region: eu-central-1
-    logGroupName: /flask-app/ec2/app-logs
-    logStreamName: "{{ inputs.aws_instance_id }}"
-    limit: 50
+    namespace: FlaskApp/Logs
+    metricName: ErrorCount
+    statistic: Sum
+    periodSeconds: 120
+    window: PT2M
 
-  # 4. AI Agent analyses the health + CloudWatch logs
+  # 4. Query WarningCount metric from CloudWatch (namespace: FlaskApp/Logs)
+  #
+  #    Driven by a Metric Filter that increments by 1 for every [WARNING] line.
+  - id: query_warning_count
+    type: io.kestra.plugin.aws.cloudwatch.Query
+    accessKeyId: "{{ secret('AWS_ACCESS_KEY_ID') }}"
+    secretKeyId: "{{ secret('AWS_SECRET_ACCESS_KEY') }}"
+    region: eu-central-1
+    namespace: FlaskApp/Logs
+    metricName: WarningCount
+    statistic: Sum
+    periodSeconds: 120
+    window: PT2M
+
+  # 5. AI Agent analyses health status + CloudWatch metrics
   - id: ai_diagnosis
     type: io.kestra.plugin.ai.agent.AIAgent
     systemMessage: |
       You are an expert SRE monitoring an AWS EC2 Flask application.
-      You receive the HTTP health status and the last 50 log lines from CloudWatch.
+      You receive HTTP health status and CloudWatch metrics derived from the app logs.
       Your job:
       1. Determine overall severity: OK / WARNING / CRITICAL
       2. Identify the root cause in plain English (1 sentence)
       3. Give one specific fix the developer should do right now
       Keep your response under 6 lines. Be direct.
     prompt: |
-      === AWS EC2 ===
+      === AWS EC2 (last 2 minutes) ===
       Health endpoint status : {{ outputs.health_check_aws.code }}
       API endpoint status    : {{ outputs.ping_api_aws.code }}
+      ERROR  log lines count : {{ outputs.query_error_count.series | jq('[.[].value] | add // 0') }}
+      WARNING log lines count: {{ outputs.query_warning_count.series | jq('[.[].value] | add // 0') }}
 
-      Recent logs (CloudWatch /flask-app/ec2/app-logs):
-      {{ outputs.read_logs_aws.events | jq('[.[].message] | join("\n")') }}
-
-  # 5. Alert on Slack only when something is wrong
+  # 6. Alert on Slack when errors are detected or endpoints are down
   - id: alert_if_broken
     type: io.kestra.plugin.core.flow.If
-    condition: "{{ outputs.ping_api_aws.code != 200 or outputs.health_check_aws.code != 200 }}"
+    condition: "{{ outputs.ping_api_aws.code != 200 or outputs.health_check_aws.code != 200 or outputs.query_error_count.count > 0 }}"
     then:
       - id: slack_alert
         type: io.kestra.plugin.notifications.slack.SlackIncomingWebhook

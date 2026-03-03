@@ -38,6 +38,36 @@ resource "aws_cloudwatch_log_group" "flask_app" {
   }
 }
 
+# ─── CloudWatch Metric Filters ────────────────────────────────────────────────
+#
+# Each filter watches the log group for a pattern and increments a custom
+# metric in the "FlaskApp/Logs" namespace whenever a matching line arrives.
+# Kestra's io.kestra.plugin.aws.cloudwatch.Query can then query these metrics.
+
+resource "aws_cloudwatch_log_metric_filter" "error_count" {
+  name           = "flask-app-error-count"
+  log_group_name = aws_cloudwatch_log_group.flask_app.name
+  pattern        = "\"[ERROR]\""
+
+  metric_transformation {
+    name      = "ErrorCount"
+    namespace = "FlaskApp/Logs"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "warning_count" {
+  name           = "flask-app-warning-count"
+  log_group_name = aws_cloudwatch_log_group.flask_app.name
+  pattern        = "\"[WARNING]\""
+
+  metric_transformation {
+    name      = "WarningCount"
+    namespace = "FlaskApp/Logs"
+    value     = "1"
+  }
+}
+
 # ─── VPC ─────────────────────────────────────────────────────────────────────
 
 resource "aws_vpc" "main" {
