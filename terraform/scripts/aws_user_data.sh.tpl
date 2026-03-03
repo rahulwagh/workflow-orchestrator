@@ -52,7 +52,9 @@ systemctl start flask-app
 curl -fsSL \
   "https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb" \
   -o /tmp/amazon-cloudwatch-agent.deb
-dpkg -i /tmp/amazon-cloudwatch-agent.deb
+
+# dpkg exits non-zero on unmet deps; apt-get -f resolves them
+dpkg -i /tmp/amazon-cloudwatch-agent.deb || apt-get install -f -y
 
 mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
 
@@ -67,7 +69,8 @@ cat <<'CWEOF' > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.jso
             "log_group_name": "${cloudwatch_log_group}",
             "log_stream_name": "{instance_id}",
             "timezone": "UTC",
-            "timestamp_format": "%Y-%m-%d %H:%M:%S,%f"
+            "timestamp_format": "%Y-%m-%d %H:%M:%S,%f",
+            "start_position": "beginning"
           }
         ]
       }
