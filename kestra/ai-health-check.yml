@@ -60,7 +60,7 @@ tasks:
   # ── Step 2: Alert on Slack if the agent reported DOWN ─────────────────────
   - id: alert_if_down
     type: io.kestra.plugin.core.flow.If
-    condition: "{{ 'DOWN' in outputs.health_agent.outputText }}"
+    condition: "{{ outputs.health_agent.outputText matches '.*DOWN.*' }}"
     then:
       - id: slack_alert
         type: io.kestra.plugin.notifications.slack.SlackIncomingWebhook
